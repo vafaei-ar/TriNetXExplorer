@@ -1,0 +1,2 @@
+# Current audit scaffold uses only the Python standard library.
+# Dashboard dependencies will be added after the first data audit.
