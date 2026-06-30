@@ -1,0 +1,14 @@
+# Example configuration for future TriNetX dashboard/audit settings.
+# The current audit script is CLI-driven and does not require this file.
+
+privacy:
+  raw_rows_written: false
+  patient_level_exports: false
+  small_cell_threshold: 11
+
+data:
+  default_input_glob: "~/datasets/trinetx/*.zip"
+  expected_archives:
+    - "66350692f55db9228fba3206_20240514_224202103_Control.zip"
+    - "stroke_diamond_network_dataset_64b01b62c6dca15375ae9828.zip"
+    - "stroke_research_network_dataset_68b1a0575a2bf16052a523ef.zip"
