@@ -20,8 +20,23 @@ import streamlit as st
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SMALL_CELL_THRESHOLD_DEFAULT = 11
 CONCEPT_REGISTRY_PATH = Path("config/research_concepts.json")
+DATASET_LABELS = {
+    "control_20240514": "Control",
+    "stroke_diamond": "Stroke Diamond",
+    "stroke_research": "Stroke Research",
+}
+DATASET_KEYS = {v: k for k, v in DATASET_LABELS.items()}
+ALL_DATASETS = "All datasets"
 
 st.set_page_config(page_title="TriNetX Research Workspace", layout="wide")
+
+
+def dataset_label(value: str) -> str:
+    return DATASET_LABELS.get(str(value), str(value))
+
+
+def selected_dataset_key(label: str) -> str:
+    return "All" if label == ALL_DATASETS else DATASET_KEYS[label]
 
 
 def quote_ident(name: str) -> str:
@@ -80,11 +95,24 @@ def load_concepts() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def display_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "archive_short" in out.columns:
+        out.insert(0, "dataset", out["archive_short"].map(dataset_label))
+        out = out.drop(columns=["archive_short"])
+    for col in ["archive_name", "patient_id", "encounter_id", "unique_id", "source_id"]:
+        if col in out.columns:
+            out = out.drop(columns=[col])
+    return out
+
+
 def show_df(df: pd.DataFrame, height: int = 380) -> None:
     if df.empty:
         st.info("No rows available.")
     else:
-        st.dataframe(df, use_container_width=True, height=height)
+        st.dataframe(display_frame(df), use_container_width=True, height=height)
 
 
 def view_set(view_df: pd.DataFrame) -> set[str]:
@@ -100,14 +128,14 @@ def archive_column(colnames: list[str]) -> str | None:
     return None
 
 
-def count_by_archive_sql(view_name: str, colnames: list[str], selected_archive: str) -> str:
+def count_by_dataset_sql(view_name: str, colnames: list[str], dataset_key: str) -> str:
     qview = quote_ident(view_name)
     acol = archive_column(colnames)
     if acol:
         archive_expr = f"cast({quote_ident(acol)} as varchar)"
         where = ""
-        if selected_archive != "All":
-            where = f"where {archive_expr} = {sql_string(selected_archive)}"
+        if dataset_key != "All":
+            where = f"where {archive_expr} = {sql_string(dataset_key)}"
         return f"""
         select {archive_expr} as archive_short, count(*) as n
         from {qview}
@@ -135,7 +163,7 @@ def aggregate_text_search_sql(view_name: str, colnames: list[str], term: str, li
 
 def diagnosis_feasibility_sql(
     colnames: list[str],
-    selected_archive: str,
+    dataset_key: str,
     code_system: str,
     code_prefix: str,
     threshold: int,
@@ -149,8 +177,8 @@ def diagnosis_feasibility_sql(
         raise ValueError("v_diagnosis does not contain a `code` column.")
 
     where_parts: list[str] = []
-    if acol and selected_archive != "All":
-        where_parts.append(f"cast({quote_ident(acol)} as varchar) = {sql_string(selected_archive)}")
+    if acol and dataset_key != "All":
+        where_parts.append(f"cast({quote_ident(acol)} as varchar) = {sql_string(dataset_key)}")
     if code_system_col and code_system and code_system != "All":
         where_parts.append(f"cast({quote_ident(code_system_col)} as varchar) = {sql_string(code_system)}")
     if code_prefix:
@@ -160,10 +188,7 @@ def diagnosis_feasibility_sql(
     patient_expr = f"count(distinct {quote_ident(patient_col)})" if patient_col else "NULL"
     return f"""
     with agg as (
-      select
-        {archive_expr} as archive_short,
-        count(*) as diagnosis_records,
-        {patient_expr} as patients
+      select {archive_expr} as archive_short, count(*) as diagnosis_records, {patient_expr} as patients
       from {qview}
       {where_sql}
       group by 1
@@ -178,17 +203,17 @@ def diagnosis_feasibility_sql(
     """
 
 
-def render_data_guide(db_path: str, vdf: pd.DataFrame, selected_archive: str) -> None:
+def render_data_guide(db_path: str, vdf: pd.DataFrame, dataset_key: str) -> None:
     st.subheader("Data guide")
     st.markdown(
         """
-TriNetXExplorer currently organizes three local TriNetX exports into a safe exploration workflow.
+TriNetXExplorer organizes three local TriNetX exports into a safe exploration workflow.
 
-**Confirmed exports**
+**Datasets**
 
-- Control cohort: approximately 8.0M patients
-- Stroke Diamond cohort: approximately 4.3M patients
-- Stroke Research Network cohort: approximately 3.3M patients
+- **Control**: approximately 8.0M patients
+- **Stroke Diamond**: approximately 4.3M stroke-cohort patients
+- **Stroke Research**: approximately 3.3M stroke-cohort patients
 
 Use this workspace to learn what is available, identify candidate concepts, and estimate feasibility before building a formal analysis plan.
         """.strip()
@@ -198,8 +223,8 @@ Use this workspace to learn what is available, identify candidate concepts, and 
     show_df(pd.DataFrame([{"component": v, "available": v in current_views} for v in core]), height=180)
     if "v_patient" in current_views:
         cols = columns(db_path, "v_patient")
-        counts = query_duckdb(db_path, count_by_archive_sql("v_patient", cols, selected_archive))
-        st.write("Converted patient rows by archive")
+        counts = query_duckdb(db_path, count_by_dataset_sql("v_patient", cols, dataset_key))
+        st.write("Converted patient rows by dataset")
         show_df(counts, height=180)
 
 
@@ -214,24 +239,23 @@ def render_study_areas(vdf: pd.DataFrame) -> None:
         {"research_area": "Acute stroke procedures", "status": "Available now" if "v_procedure" in current else "Available after procedure conversion", "needed_views": "v_procedure"},
         {"research_area": "Medication exposure", "status": "Available after medication conversion", "needed_views": "v_medication_ingredient, v_medication_drug"},
         {"research_area": "Labs and vitals", "status": "Available after lab/vitals conversion", "needed_views": "v_lab_result, v_vitals_signs"},
-        {"research_area": "Cost/utilization", "status": "Control/Diamond only after cost conversion", "needed_views": "v_cost_medical, v_cost_pharmacy"},
-        {"research_area": "Encounter-based analyses", "status": "Research Network only after encounter conversion", "needed_views": "v_encounter"},
+        {"research_area": "Cost/utilization", "status": "Control/Stroke Diamond only after cost conversion", "needed_views": "v_cost_medical, v_cost_pharmacy"},
+        {"research_area": "Encounter-based analyses", "status": "Stroke Research only after encounter conversion", "needed_views": "v_encounter"},
     ]
     show_df(pd.DataFrame(areas), height=430)
 
 
 def render_network_differences() -> None:
-    st.subheader("Network differences")
+    st.subheader("Dataset differences")
     df = pd.DataFrame([
-        {"feature": "Approximate patient count", "Control/Diamond": "8.0M control; 4.3M stroke Diamond", "Research Network": "3.3M stroke Research"},
-        {"feature": "Observation window", "Control/Diamond": "Sampled profile mostly through 2020-04", "Research Network": "Sampled profile extends to 2025-08"},
-        {"feature": "Cost tables", "Control/Diamond": "Available", "Research Network": "Not available in current export"},
-        {"feature": "Encounter table", "Control/Diamond": "Not available in current export", "Research Network": "Available"},
-        {"feature": "Encounter/source IDs", "Control/Diamond": "Less encounter detail", "Research Network": "Encounter/source layer present"},
-        {"feature": "Interpretation", "Control/Diamond": "Useful for cost-enabled and older-window comparisons", "Research Network": "Useful for recent and encounter-enabled analyses"},
+        {"feature": "Approximate patient count", "Control / Stroke Diamond": "8.0M control; 4.3M stroke Diamond", "Stroke Research": "3.3M stroke Research"},
+        {"feature": "Observation window", "Control / Stroke Diamond": "Sampled profile mostly through 2020-04", "Stroke Research": "Sampled profile extends to 2025-08"},
+        {"feature": "Cost tables", "Control / Stroke Diamond": "Available", "Stroke Research": "Not available in current export"},
+        {"feature": "Encounter table", "Control / Stroke Diamond": "Not available in current export", "Stroke Research": "Available"},
+        {"feature": "Interpretation", "Control / Stroke Diamond": "Useful for cost-enabled and older-window comparisons", "Stroke Research": "Useful for recent and encounter-enabled analyses"},
     ])
     show_df(df, height=330)
-    st.warning("Do not treat the three exports as interchangeable. Study design should explicitly choose which network(s) are appropriate.")
+    st.warning("Do not treat the three datasets as interchangeable. Study design should explicitly choose which dataset(s) are appropriate.")
 
 
 def render_concept_browser(db_path: str, vdf: pd.DataFrame) -> None:
@@ -252,12 +276,12 @@ def render_concept_browser(db_path: str, vdf: pd.DataFrame) -> None:
         show_df(results, height=460)
 
 
-def render_feasibility(db_path: str, vdf: pd.DataFrame, selected_archive: str, threshold: int) -> None:
+def render_feasibility(db_path: str, vdf: pd.DataFrame, dataset_key: str, threshold: int) -> None:
     st.subheader("Cohort feasibility")
     st.markdown("This page answers: **How many patients might match my idea?** It becomes active when the relevant event table has been converted.")
     current = view_set(vdf)
     if "v_diagnosis" not in current:
-        st.info("Diagnosis-backed feasibility is not active yet. Convert `diagnosis.csv` archive-by-archive and rebuild DuckDB views.")
+        st.info("Diagnosis-backed feasibility is not active yet. Convert `diagnosis.csv` dataset-by-dataset and rebuild DuckDB views.")
         st.code(
             """python scripts/convert_trinetx_zip_to_parquet.py \
   --input-glob "$HOME/datasets/trinetx/*.zip" \
@@ -280,11 +304,12 @@ def render_feasibility(db_path: str, vdf: pd.DataFrame, selected_archive: str, t
         code_system = st.selectbox("Code system", systems)
     code_prefix = st.text_input("Code prefix", value="I63")
     if st.button("Run diagnosis feasibility query"):
-        sql = diagnosis_feasibility_sql(diag_cols, selected_archive, code_system, code_prefix.strip(), threshold)
+        sql = diagnosis_feasibility_sql(diag_cols, dataset_key, code_system, code_prefix.strip(), threshold)
         result = query_duckdb(db_path, sql)
         show_df(result, height=260)
         if not result.empty and "patients" in result.columns:
-            fig = px.bar(result, x="archive_short", y="patients", title="Aggregate patient feasibility count")
+            plot_df = display_frame(result)
+            fig = px.bar(plot_df, x="dataset" if "dataset" in plot_df.columns else "archive_short", y="patients", title="Aggregate patient feasibility count")
             st.plotly_chart(fig, use_container_width=True)
 
 
@@ -297,7 +322,7 @@ def render_recipes() -> None:
         {"recipe": "Anticoagulant exposure", "question": "Can we study DOAC/warfarin exposure?", "needs": "medication_ingredient.csv, medication_drug.csv", "status": "After medication conversion"},
         {"recipe": "LDL availability after stroke", "question": "Do we have enough lipid lab data?", "needs": "lab_result.csv", "status": "After lab conversion"},
         {"recipe": "BP follow-up", "question": "Are BP/vital measurements available?", "needs": "vitals_signs.csv", "status": "After vitals conversion"},
-        {"recipe": "Cost after stroke", "question": "Can we study cost/utilization?", "needs": "cost_medical.csv, cost_pharmacy.csv", "status": "Control/Diamond only"},
+        {"recipe": "Cost after stroke", "question": "Can we study cost/utilization?", "needs": "cost_medical.csv, cost_pharmacy.csv", "status": "Control/Stroke Diamond only"},
     ])
     show_df(recipes, height=390)
 
@@ -306,8 +331,10 @@ def main() -> None:
     st.title("TriNetX Research Workspace")
     st.caption("A faculty-facing workspace for learning, exploring, and testing research ideas using aggregate-only views.")
     with st.sidebar:
-        db_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
-        selected_archive = st.selectbox("Archive/network", ["All", "control_20240514", "stroke_diamond", "stroke_research"])
+        dataset_choice = st.selectbox("Dataset", [ALL_DATASETS, "Control", "Stroke Diamond", "Stroke Research"])
+        dataset_key = selected_dataset_key(dataset_choice)
+        with st.expander("Advanced data source", expanded=False):
+            db_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
         threshold = st.number_input("Small-cell threshold", min_value=1, max_value=1000, value=SMALL_CELL_THRESHOLD_DEFAULT, step=1)
 
     try:
@@ -318,9 +345,9 @@ def main() -> None:
         return
 
     st.warning("Aggregate-only. Do not display raw patient rows or identifiers. Concept definitions are preliminary until clinically validated.")
-    tabs = st.tabs(["Data guide", "What can I study?", "Network differences", "Concept browser", "Feasibility", "Recipes"])
+    tabs = st.tabs(["Data guide", "What can I study?", "Dataset differences", "Concept browser", "Feasibility", "Recipes"])
     with tabs[0]:
-        render_data_guide(db_path, vdf, selected_archive)
+        render_data_guide(db_path, vdf, dataset_key)
     with tabs[1]:
         render_study_areas(vdf)
     with tabs[2]:
@@ -328,7 +355,7 @@ def main() -> None:
     with tabs[3]:
         render_concept_browser(db_path, vdf)
     with tabs[4]:
-        render_feasibility(db_path, vdf, selected_archive, int(threshold))
+        render_feasibility(db_path, vdf, dataset_key, int(threshold))
     with tabs[5]:
         render_recipes()
 
