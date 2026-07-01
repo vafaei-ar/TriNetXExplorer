@@ -39,7 +39,7 @@ The script writes a timestamped output directory and a ZIP under `outputs/trinet
 
 ## Optional: build Parquet and DuckDB layers
 
-The DuckDB aggregate tab appears after local Parquet conversion and DuckDB view creation.
+The DuckDB aggregate tab and the faculty-facing Research Workspace appear after local Parquet conversion and DuckDB view creation.
 
 For the current core-table layer:
 
@@ -68,7 +68,25 @@ source .venv/bin/activate
 streamlit run dashboard/app.py
 ```
 
-In the sidebar, set **Profile output directory or ZIP** to either:
+Streamlit will show two pages in the left sidebar:
+
+```text
+TriNetXExplorer
+Research Workspace
+```
+
+Use **TriNetXExplorer** for technical profile/audit review.
+
+Use **Research Workspace** for faculty-facing exploration:
+
+- data guide
+- what can I study?
+- network differences
+- concept/code browser
+- cohort feasibility placeholder
+- example research recipes
+
+In the main TriNetXExplorer page sidebar, set **Profile output directory or ZIP** to either:
 
 ```text
 outputs/trinetx_profile/YYYYMMDD_HHMMSS
@@ -103,6 +121,7 @@ data/trinetx.duckdb
 - date ranges
 - numeric and cost summaries
 - DuckDB aggregate counts over converted Parquet views
+- Research Workspace for faculty-facing idea exploration
 - privacy rules
 
 ## What v0.1 does not do
