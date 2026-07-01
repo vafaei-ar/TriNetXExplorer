@@ -1,18 +1,21 @@
-"""Streamlit dashboard for aggregate TriNetX profile outputs.
+"""Streamlit dashboard for aggregate TriNetX profile and DuckDB outputs.
 
 Run:
     streamlit run dashboard/app.py
 
-The dashboard reads only outputs created by scripts/audit_trinetx_archives.py
-and scripts/profile_trinetx_archives.py. It is not a raw TriNetX data browser.
+The dashboard reads aggregate profile outputs and, optionally, aggregate queries
+from a local DuckDB database built over local Parquet files. It is not a raw
+TriNetX data browser.
 """
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+import re
 import zipfile
 
+import duckdb
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -26,6 +29,9 @@ EXPECTED_PROFILE_FILES = [
     "date_ranges.csv",
     "numeric_summaries.csv",
 ]
+
+SMALL_CELL_THRESHOLD_DEFAULT = 11
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 st.set_page_config(
@@ -135,9 +141,224 @@ def metadata_manifest(metadata: pd.DataFrame) -> pd.DataFrame:
     return out[wanted].sort_values([c for c in ["archive_short", "file"] if c in wanted])
 
 
+def quote_ident(name: str) -> str:
+    if not SAFE_IDENTIFIER_RE.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name}")
+    return f'"{name}"'
+
+
+@st.cache_data(show_spinner=False)
+def duckdb_query(db_path_text: str, sql: str) -> pd.DataFrame:
+    db_path = Path(os.path.expanduser(db_path_text)).resolve()
+    if not db_path.exists():
+        raise FileNotFoundError(f"DuckDB database not found: {db_path}")
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        return con.execute(sql).fetchdf()
+    finally:
+        con.close()
+
+
+@st.cache_data(show_spinner=False)
+def duckdb_views(db_path_text: str) -> pd.DataFrame:
+    return duckdb_query(
+        db_path_text,
+        """
+        select table_name as view_name
+        from information_schema.tables
+        where table_type = 'VIEW'
+        order by table_name
+        """,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def duckdb_columns(db_path_text: str, view_name: str) -> list[str]:
+    qview = quote_ident(view_name)
+    df = duckdb_query(db_path_text, f"describe {qview}")
+    if "column_name" not in df.columns:
+        return []
+    return [str(x) for x in df["column_name"].tolist()]
+
+
+def view_exists(views: pd.DataFrame, view_name: str) -> bool:
+    return not views.empty and view_name in set(views["view_name"].astype(str))
+
+
+def archive_column(cols: list[str]) -> str | None:
+    for c in ["archive", "archive_short", "__archive_short"]:
+        if c in cols:
+            return c
+    return None
+
+
+def filtered_aggregate_sql(
+    view_name: str,
+    cols: list[str],
+    group_col: str,
+    selected_archive: str,
+    threshold: int,
+    limit: int = 500,
+) -> str:
+    qview = quote_ident(view_name)
+    qgroup = quote_ident(group_col)
+    acol = archive_column(cols)
+    if acol:
+        qarchive = quote_ident(acol)
+        archive_expr = f"cast({qarchive} as varchar)"
+        where = ""
+        if selected_archive != "All":
+            escaped = selected_archive.replace("'", "''")
+            where = f"where {archive_expr} = '{escaped}'"
+        return f"""
+            select
+              {archive_expr} as archive_short,
+              cast({qgroup} as varchar) as value,
+              count(*) as n
+            from {qview}
+            {where}
+            group by 1, 2
+            having count(*) >= {int(threshold)}
+            order by archive_short, n desc
+            limit {int(limit)}
+        """
+    return f"""
+        select
+          'all' as archive_short,
+          cast({qgroup} as varchar) as value,
+          count(*) as n
+        from {qview}
+        group by 1, 2
+        having count(*) >= {int(threshold)}
+        order by n desc
+        limit {int(limit)}
+    """
+
+
+def count_by_archive_sql(view_name: str, cols: list[str], selected_archive: str) -> str:
+    qview = quote_ident(view_name)
+    acol = archive_column(cols)
+    if acol:
+        qarchive = quote_ident(acol)
+        archive_expr = f"cast({qarchive} as varchar)"
+        where = ""
+        if selected_archive != "All":
+            escaped = selected_archive.replace("'", "''")
+            where = f"where {archive_expr} = '{escaped}'"
+        return f"""
+            select {archive_expr} as archive_short, count(*) as n
+            from {qview}
+            {where}
+            group by 1
+            order by archive_short
+        """
+    return f"select 'all' as archive_short, count(*) as n from {qview}"
+
+
+def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) -> None:
+    st.subheader("Parquet/DuckDB aggregate explorer")
+    st.markdown(
+        "This tab queries local DuckDB views over local Parquet files. It shows aggregate counts only; it does not show raw rows."
+    )
+
+    try:
+        views = duckdb_views(db_path)
+    except Exception as exc:
+        st.info(f"DuckDB is not available yet: {exc}")
+        return
+
+    if views.empty:
+        st.info("No DuckDB views found. Run `scripts/build_duckdb_views.py` first.")
+        return
+
+    st.write("Available views")
+    show_dataframe(views, height=220)
+
+    summary_rows: list[pd.DataFrame] = []
+    for view_name in views["view_name"].astype(str):
+        try:
+            cols = duckdb_columns(db_path, view_name)
+            counts = duckdb_query(db_path, count_by_archive_sql(view_name, cols, selected_archive))
+            counts.insert(0, "view_name", view_name)
+            summary_rows.append(counts)
+        except Exception as exc:
+            st.warning(f"Could not count {view_name}: {exc}")
+    if summary_rows:
+        st.write("Aggregate row counts by archive")
+        row_counts = pd.concat(summary_rows, ignore_index=True)
+        show_dataframe(row_counts, height=320)
+
+    st.divider()
+    st.subheader("Patient aggregates")
+    if view_exists(views, "v_patient"):
+        patient_cols = duckdb_columns(db_path, "v_patient")
+        candidate_fields = [
+            c for c in ["sex", "race", "ethnicity", "marital_status", "patient_regional_location", "reason_yob_missing"]
+            if c in patient_cols
+        ]
+        if candidate_fields:
+            field = st.selectbox("Patient aggregate field", candidate_fields)
+            demo_df = duckdb_query(
+                db_path,
+                filtered_aggregate_sql("v_patient", patient_cols, field, selected_archive, threshold),
+            )
+            if not demo_df.empty:
+                fig = px.bar(
+                    demo_df,
+                    x="value",
+                    y="n",
+                    color="archive_short",
+                    title=f"Patient counts by {field}",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            show_dataframe(demo_df, height=420)
+        else:
+            st.info("`v_patient` exists, but no known demographic aggregate fields were found.")
+    else:
+        st.info("`v_patient` is not available yet. Convert `patient.csv` and rebuild DuckDB views.")
+
+    st.divider()
+    st.subheader("Patient-cohort aggregates")
+    if view_exists(views, "v_patient_cohort"):
+        cohort_cols = duckdb_columns(db_path, "v_patient_cohort")
+        visible_cols = [c for c in cohort_cols if c not in {"patient_id", "encounter_id", "unique_id", "source_id"}]
+        group_options = [c for c in visible_cols if c not in {"__source_archive", "__source_member", "archive", "table"}]
+        group_options = [c for c in group_options if c != archive_column(cohort_cols)]
+        if group_options:
+            field = st.selectbox("Patient-cohort aggregate field", group_options)
+            cohort_df = duckdb_query(
+                db_path,
+                filtered_aggregate_sql("v_patient_cohort", cohort_cols, field, selected_archive, threshold),
+            )
+            show_dataframe(cohort_df, height=420)
+        else:
+            counts = duckdb_query(db_path, count_by_archive_sql("v_patient_cohort", cohort_cols, selected_archive))
+            show_dataframe(counts, height=220)
+    else:
+        st.info("`v_patient_cohort` is not available yet. Convert `patient_cohort.csv` and rebuild DuckDB views.")
+
+    st.divider()
+    st.subheader("Terminology aggregates")
+    if view_exists(views, "v_standardized_terminology"):
+        term_cols = duckdb_columns(db_path, "v_standardized_terminology")
+        term_fields = [c for c in ["code_system", "category", "type", "domain", "vocabulary"] if c in term_cols]
+        if term_fields:
+            field = st.selectbox("Terminology aggregate field", term_fields)
+            term_df = duckdb_query(
+                db_path,
+                filtered_aggregate_sql("v_standardized_terminology", term_cols, field, selected_archive, threshold),
+            )
+            show_dataframe(term_df, height=420)
+        else:
+            counts = duckdb_query(db_path, count_by_archive_sql("v_standardized_terminology", term_cols, selected_archive))
+            show_dataframe(counts, height=220)
+    else:
+        st.info("`v_standardized_terminology` is not available yet. Convert `standardized_terminology.csv` and rebuild DuckDB views.")
+
+
 def main() -> None:
     st.title("TriNetXExplorer")
-    st.caption("Aggregate profile dashboard. It reads audit/profile outputs only. It does not open raw TriNetX exports.")
+    st.caption("Aggregate profile and DuckDB dashboard. It does not open raw TriNetX exports or display patient-level rows.")
 
     with st.sidebar:
         st.header("Profile source")
@@ -146,6 +367,15 @@ def main() -> None:
         st.markdown(
             "Run `scripts/profile_trinetx_archives.py` first. "
             "Point this dashboard to the generated output directory or ZIP."
+        )
+        st.header("DuckDB source")
+        duckdb_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
+        small_cell_threshold = st.number_input(
+            "Small-cell threshold",
+            min_value=1,
+            max_value=1000,
+            value=SMALL_CELL_THRESHOLD_DEFAULT,
+            step=1,
         )
 
     try:
@@ -158,7 +388,7 @@ def main() -> None:
     with st.sidebar:
         archive = st.selectbox("Archive", archives)
         tables = available_tables(data, archive)
-        table = st.selectbox("Table", tables)
+        table = st.selectbox("Profile table", tables)
 
     table_profiles = filter_frame(data.get("table_profiles.csv", pd.DataFrame()), archive, table)
     metadata = filter_frame(data.get("metadata_tables.csv", pd.DataFrame()), archive, table)
@@ -169,14 +399,15 @@ def main() -> None:
     numeric = filter_frame(data.get("numeric_summaries.csv", pd.DataFrame()), archive, table)
 
     st.warning(
-        "Counts in profile-derived tables are sample-based unless `scan_mode` says full. "
-        "Use them to design the dashboard and detect structure, not as final epidemiologic estimates."
+        "Profile-derived counts are sample-based unless `scan_mode` says full. "
+        "DuckDB-derived counts are aggregate queries over locally converted Parquet. "
+        "Neither should expose raw TriNetX rows."
     )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Profile scan mode", manifest.get("scan_mode", "-"))
     c2.metric("Rows per file", metric_int(manifest.get("max_rows_per_file")))
-    c3.metric("Small-cell threshold", metric_int(manifest.get("small_cell_threshold")))
+    c3.metric("Small-cell threshold", metric_int(small_cell_threshold))
     c4.metric("Elapsed seconds", metric_int(manifest.get("elapsed_seconds")))
 
     tabs = st.tabs([
@@ -187,6 +418,7 @@ def main() -> None:
         "Demographics",
         "Dates",
         "Numeric and cost",
+        "DuckDB aggregates",
         "Privacy rules",
     ])
 
@@ -282,15 +514,18 @@ def main() -> None:
         show_dataframe(numeric)
 
     with tabs[7]:
+        duckdb_aggregate_tab(duckdb_path, archive, int(small_cell_threshold))
+
+    with tabs[8]:
         st.subheader("Default privacy rules")
         st.markdown(
             """
 - Do not display raw `patient_id`, `encounter_id`, `unique_id`, or `source_id`.
-- Do not show raw rows from TriNetX exports.
+- Do not show raw rows from TriNetX exports, Parquet files, or DuckDB views.
 - Do not allow patient-level downloads from the dashboard.
 - Apply small-cell suppression, default `n < 11`.
 - Treat this dashboard as internal-only. Do not expose it publicly.
-- Use profile and catalog outputs for dashboard v0.1. Convert raw CSV exports to Parquet before interactive event-level queries.
+- Use profile outputs for structural review and DuckDB only for aggregate queries.
             """.strip()
         )
 
