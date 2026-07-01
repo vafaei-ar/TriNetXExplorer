@@ -1,6 +1,6 @@
 # Running the TriNetXExplorer dashboard v0.1
 
-The first dashboard reads aggregate profile outputs only. It does not open raw TriNetX ZIP exports.
+The dashboard reads aggregate profile outputs and can optionally query local DuckDB views over local Parquet files. It does not open raw TriNetX ZIP exports and does not display raw rows.
 
 ## Create and activate a virtual environment
 
@@ -37,6 +37,30 @@ python scripts/profile_trinetx_archives.py \
 
 The script writes a timestamped output directory and a ZIP under `outputs/trinetx_profile/`.
 
+## Optional: build Parquet and DuckDB layers
+
+The DuckDB aggregate tab appears after local Parquet conversion and DuckDB view creation.
+
+For the current core-table layer:
+
+```bash
+python scripts/convert_trinetx_zip_to_parquet.py \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
+  --output-dir data/trinetx_parquet \
+  --catalog-dir outputs/trinetx_parquet_catalog \
+  --tables patient.csv,patient_cohort.csv,standardized_terminology.csv \
+  --chunksize 250000 \
+  --compression snappy \
+  --overwrite
+
+python scripts/build_duckdb_views.py \
+  --parquet-dir data/trinetx_parquet \
+  --duckdb-path data/trinetx.duckdb \
+  --catalog-dir outputs/trinetx_duckdb_catalog \
+  --count-rows \
+  --overwrite
+```
+
 ## Start dashboard
 
 ```bash
@@ -62,6 +86,12 @@ Example:
 outputs/trinetx_profile/20260630_193653.zip
 ```
 
+Set **DuckDB database** to:
+
+```text
+data/trinetx.duckdb
+```
+
 ## What v0.1 shows
 
 - profiled tables
@@ -72,6 +102,7 @@ outputs/trinetx_profile/20260630_193653.zip
 - demographics, suppressed and sample-based
 - date ranges
 - numeric and cost summaries
+- DuckDB aggregate counts over converted Parquet views
 - privacy rules
 
 ## What v0.1 does not do
@@ -82,4 +113,4 @@ outputs/trinetx_profile/20260630_193653.zip
 - It does not query the raw ZIP files interactively.
 - It does not produce final epidemiologic estimates.
 
-The profile outputs are sample-based unless the profile script was run with `--full-scan`. Treat dashboard v0.1 as a structural review tool, not as the final analytic interface.
+The profile outputs are sample-based unless the profile script was run with `--full-scan`. DuckDB counts are exact for converted Parquet tables, but they are still aggregate infrastructure checks unless paired with validated concept definitions.
