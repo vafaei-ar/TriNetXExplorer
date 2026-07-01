@@ -25,6 +25,14 @@ from collections import Counter, defaultdict
 from typing import Any, Iterable
 
 DATE_RE = re.compile(r"date|year|month|dob|birth|death", re.I)
+NON_DATE_FIELDS = {
+    "age_at_death",
+    "death_date_source_id",
+    "start_date_derived_by_TriNetX",
+    "end_date_derived_by_TriNetX",
+    "date_derived_by_TriNetX",
+    "source_id",
+}
 CODE_TABLES = {
     "diagnosis.csv", "procedure.csv", "medication_ingredient.csv",
     "medication_drug.csv", "lab_result.csv", "vitals_signs.csv",
@@ -46,6 +54,7 @@ AMOUNT_FIELDS = {
     "coupon_value", "quantity_dispensed", "days_supply", "refills_authorized",
     "fill_number",
 }
+SUPPRESSED_LABEL = "__SUPPRESSED_SMALL_CELLS__"
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,13 +112,25 @@ def open_dict_reader(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[csv.Di
     return csv.DictReader(text, delimiter=delim), text
 
 
+def is_date_field(name: str) -> bool:
+    if name in NON_DATE_FIELDS:
+        return False
+    lower = name.lower()
+    if lower.endswith("_source_id") or lower.endswith("_derived_by_trinetx"):
+        return False
+    if "age" in lower and "date" not in lower:
+        return False
+    return bool(DATE_RE.search(name))
+
+
 def parse_date_value(value: str) -> str | None:
     v = (value or "").strip()
     if not v:
         return None
     for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y%m%d", "%Y-%m", "%Y"]:
         try:
-            d = dt.datetime.strptime(v[:10] if fmt == "%Y-%m-%d" else v, fmt)
+            candidate = v[:10] if fmt == "%Y-%m-%d" else v
+            d = dt.datetime.strptime(candidate, fmt)
             if fmt == "%Y":
                 return f"{d.year:04d}"
             if fmt == "%Y-%m":
@@ -129,15 +150,29 @@ def add_counter(counter: Counter, key: tuple[Any, ...], max_keys: int) -> None:
         counter[("__OTHER_KEYS_OVER_CAP__",)] += 1
 
 
-def safe_count_rows(counter: Counter, threshold: int, base: dict[str, Any]) -> list[dict[str, Any]]:
+def safe_count_rows(
+    counter: Counter,
+    threshold: int,
+    base: dict[str, Any],
+    top_n: int | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     suppressed_n = 0
     suppressed_categories = 0
+    kept_items: list[tuple[Any, int]] = []
+
     for key, n in counter.items():
         if n < threshold:
             suppressed_n += n
             suppressed_categories += 1
             continue
+        kept_items.append((key, n))
+
+    kept_items.sort(key=lambda kv: (-kv[1], tuple(str(x) for x in (kv[0] if isinstance(kv[0], tuple) else (kv[0],)))))
+    if top_n is not None:
+        kept_items = kept_items[:top_n]
+
+    for key, n in kept_items:
         row = dict(base)
         if not isinstance(key, tuple):
             key = (key,)
@@ -146,9 +181,10 @@ def safe_count_rows(counter: Counter, threshold: int, base: dict[str, Any]) -> l
         row["n"] = n
         row["suppressed"] = False
         rows.append(row)
+
     if suppressed_categories:
         row = dict(base)
-        row["value_1"] = "__SUPPRESSED_SMALL_CELLS__"
+        row["value_1"] = SUPPRESSED_LABEL
         row["n"] = None
         row["suppressed"] = True
         row["suppressed_categories"] = suppressed_categories
@@ -166,12 +202,30 @@ def write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: list[str]) -> 
             w.writerow(r)
 
 
+def quantile(sorted_values: list[float], q: float) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    pos = q * (len(sorted_values) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = pos - lo
+    return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
+
+
 def numeric_summary(values: list[float]) -> dict[str, Any]:
     if not values:
-        return {"n_numeric": 0, "min": None, "max": None, "mean": None}
+        return {"n_numeric": 0, "min": None, "p01": None, "p05": None, "p50": None, "p95": None, "p99": None, "max": None, "mean": None}
+    sv = sorted(values)
     return {
         "n_numeric": len(values),
         "min": min(values),
+        "p01": quantile(sv, 0.01),
+        "p05": quantile(sv, 0.05),
+        "p50": quantile(sv, 0.50),
+        "p95": quantile(sv, 0.95),
+        "p99": quantile(sv, 0.99),
         "max": max(values),
         "mean": sum(values) / len(values),
     }
@@ -187,8 +241,7 @@ def profile_member(
     member = Path(info.filename).name
     reader, text = open_dict_reader(zf, info)
     fields = reader.fieldnames or []
-    date_fields = [c for c in fields if DATE_RE.search(c)]
-    code_fields = [c for c in fields if c in {"code", "code_system"} or c.endswith("_code") or c.endswith("_code_system")]
+    date_fields = [c for c in fields if is_date_field(c)]
     demo_fields = [c for c in fields if c in DEMOGRAPHIC_FIELDS]
     amount_fields = [c for c in fields if c in AMOUNT_FIELDS]
 
@@ -200,6 +253,7 @@ def profile_member(
     metadata_rows: list[dict[str, Any]] = []
     row_count = 0
     max_rows = None if args.full_scan else args.max_rows_per_file
+    metadata_members = {"cohort_details.csv", "dataset_details.csv", "manifest.csv"}
 
     try:
         for row in reader:
@@ -208,11 +262,13 @@ def profile_member(
                 row_count -= 1
                 break
 
-            if member in {"cohort_details.csv", "dataset_details.csv", "manifest.csv"}:
-                safe_row = {k: v for k, v in row.items() if k and k.lower() not in {"patient_id", "encounter_id", "unique_id", "source_id"}}
+            if member in metadata_members:
+                safe_row = {
+                    k: v for k, v in row.items()
+                    if k and k.lower() not in {"patient_id", "encounter_id", "unique_id", "source_id"}
+                }
                 safe_row.update({"archive_name": archive_name, "archive_short": archive_short, "member_path": member})
                 metadata_rows.append(safe_row)
-                continue
 
             if "code_system" in row:
                 cs = (row.get("code_system") or "").strip() or "__MISSING__"
@@ -260,15 +316,26 @@ def profile_member(
         "member_path": member,
         "rows_scanned": row_count,
         "scan_mode": "full" if args.full_scan else "sample",
-        "code_system_rows": safe_count_rows(code_system_counts, args.small_cell_threshold, {"archive_name": archive_name, "archive_short": archive_short, "member_path": member}),
-        "top_code_rows": safe_count_rows(top_code_counts, args.small_cell_threshold, {"archive_name": archive_name, "archive_short": archive_short, "member_path": member})[: args.top_n + 1],
+        "code_system_rows": safe_count_rows(
+            code_system_counts,
+            args.small_cell_threshold,
+            {"archive_name": archive_name, "archive_short": archive_short, "member_path": member},
+        ),
+        "top_code_rows": safe_count_rows(
+            top_code_counts,
+            args.small_cell_threshold,
+            {"archive_name": archive_name, "archive_short": archive_short, "member_path": member},
+            top_n=args.top_n,
+        ),
         "demographic_rows": [],
         "date_rows": [],
         "amount_rows": [],
         "metadata_rows": metadata_rows,
     }
     for field, counter in demo_counts.items():
-        out["demographic_rows"].extend(safe_count_rows(counter, args.small_cell_threshold, {"archive_name": archive_name, "archive_short": archive_short, "member_path": member, "field": field}))
+        out["demographic_rows"].extend(
+            safe_count_rows(counter, args.small_cell_threshold, {"archive_name": archive_name, "archive_short": archive_short, "member_path": member, "field": field})
+        )
     for field, st in date_stats.items():
         out["date_rows"].append({"archive_name": archive_name, "archive_short": archive_short, "member_path": member, "field": field, **st})
     for field, values in amount_values.items():
@@ -356,7 +423,7 @@ def main() -> int:
     write_csv(out / "date_ranges.csv", date_rows,
               ["archive_name", "archive_short", "member_path", "field", "min", "max", "n_valid", "n_missing", "n_invalid"])
     write_csv(out / "numeric_summaries.csv", amount_rows,
-              ["archive_name", "archive_short", "member_path", "field", "n_numeric", "min", "max", "mean"])
+              ["archive_name", "archive_short", "member_path", "field", "n_numeric", "min", "p01", "p05", "p50", "p95", "p99", "max", "mean"])
     write_csv(out / "metadata_tables.csv", metadata_rows,
               sorted(set().union(*(r.keys() for r in metadata_rows))) if metadata_rows else ["archive_name", "archive_short", "member_path"])
 
