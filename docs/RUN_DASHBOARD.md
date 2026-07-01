@@ -35,7 +35,21 @@ python scripts/profile_trinetx_archives.py \
   --make-zip
 ```
 
-The script writes a timestamped output directory and a ZIP under `outputs/trinetx_profile/`.
+The profile script writes timestamped outputs for reproducibility. Then create a stable user-facing alias:
+
+```bash
+python scripts/set_latest_profile_catalog.py \
+  --profile-dir outputs/trinetx_profile
+```
+
+This creates:
+
+```text
+outputs/trinetx_profile/latest.zip
+outputs/trinetx_profile/latest/
+```
+
+Use `latest.zip` in the dashboard. Faculty users should not have to choose timestamped ZIP names.
 
 ## Optional: build Parquet and DuckDB layers
 
@@ -86,23 +100,19 @@ Use **Research Workspace** for faculty-facing exploration:
 - cohort feasibility placeholder
 - example research recipes
 
-In the main TriNetXExplorer page sidebar, set **Profile output directory or ZIP** to either:
+In the main TriNetXExplorer page, normal users should use the simple selector:
 
 ```text
-outputs/trinetx_profile/YYYYMMDD_HHMMSS
+Dataset: All datasets / Control / Stroke Diamond / Stroke Research
 ```
 
-or:
+The profile catalog defaults to:
 
 ```text
-outputs/trinetx_profile/YYYYMMDD_HHMMSS.zip
+outputs/trinetx_profile/latest.zip
 ```
 
-Example:
-
-```text
-outputs/trinetx_profile/20260630_193653.zip
-```
+The advanced profile path is hidden inside an expander and should usually not be changed.
 
 Set **DuckDB database** to:
 
@@ -112,6 +122,7 @@ data/trinetx.duckdb
 
 ## What v0.1 shows
 
+- friendly dataset selector: Control, Stroke Diamond, Stroke Research
 - profiled tables
 - manifest row counts
 - dataset and cohort metadata
@@ -126,6 +137,7 @@ data/trinetx.duckdb
 
 ## What v0.1 does not do
 
+- It does not display raw ZIP filenames in normal user-facing tables.
 - It does not display `patient_id`, `encounter_id`, `unique_id`, or `source_id`.
 - It does not display raw TriNetX rows.
 - It does not download patient-level data.
