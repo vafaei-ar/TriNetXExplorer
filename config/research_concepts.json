@@ -1,0 +1,117 @@
+{
+  "concepts": [
+    {
+      "name": "Ischemic stroke",
+      "domain": "Stroke/TIA",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["I63", "I65", "I66", "433", "434"],
+      "notes": "Initial feasibility concept. Needs clinical validation before analysis."
+    },
+    {
+      "name": "Transient ischemic attack",
+      "domain": "Stroke/TIA",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["G45", "435"],
+      "notes": "Initial feasibility concept. Needs validation and subtype review."
+    },
+    {
+      "name": "Hemorrhagic stroke",
+      "domain": "Stroke/TIA",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["I60", "I61", "I62", "430", "431", "432"],
+      "notes": "Initial broad concept for feasibility only."
+    },
+    {
+      "name": "Atrial fibrillation/flutter",
+      "domain": "Cardiovascular risk factors",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["I48", "427.31", "427.32"],
+      "notes": "Useful for pre-stroke comorbidity and post-stroke risk stratification ideas."
+    },
+    {
+      "name": "Hypertension",
+      "domain": "Cardiovascular risk factors",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["I10", "I11", "I12", "I13", "I15", "401", "402", "403", "404", "405"],
+      "notes": "Broad feasibility concept."
+    },
+    {
+      "name": "Diabetes mellitus",
+      "domain": "Cardiovascular risk factors",
+      "primary_table": "diagnosis",
+      "status": "available_after_diagnosis_conversion",
+      "code_systems": ["ICD-10-CM", "ICD-9-CM"],
+      "code_prefixes": ["E10", "E11", "E13", "250"],
+      "notes": "Broad feasibility concept."
+    },
+    {
+      "name": "Thrombolysis/thrombectomy procedures",
+      "domain": "Acute stroke treatment",
+      "primary_table": "procedure",
+      "status": "available_after_procedure_conversion",
+      "code_systems": ["CPT", "HCPCS", "ICD-10-PCS"],
+      "code_prefixes": [],
+      "notes": "Requires curated procedure codes before use."
+    },
+    {
+      "name": "Anticoagulants",
+      "domain": "Medication exposure",
+      "primary_table": "medication_ingredient / medication_drug",
+      "status": "available_after_medication_conversion",
+      "code_systems": ["RxNorm", "RxNorm_drug", "NDC"],
+      "code_prefixes": [],
+      "search_terms": ["warfarin", "apixaban", "rivaroxaban", "dabigatran", "edoxaban", "heparin", "enoxaparin"],
+      "notes": "Requires medication table conversion and ingredient/drug mapping."
+    },
+    {
+      "name": "Antiplatelets",
+      "domain": "Medication exposure",
+      "primary_table": "medication_ingredient / medication_drug",
+      "status": "available_after_medication_conversion",
+      "code_systems": ["RxNorm", "RxNorm_drug", "NDC"],
+      "code_prefixes": [],
+      "search_terms": ["aspirin", "clopidogrel", "prasugrel", "ticagrelor", "dipyridamole"],
+      "notes": "Requires medication table conversion and clinical validation."
+    },
+    {
+      "name": "Statins",
+      "domain": "Medication exposure",
+      "primary_table": "medication_ingredient / medication_drug",
+      "status": "available_after_medication_conversion",
+      "code_systems": ["RxNorm", "RxNorm_drug", "NDC"],
+      "code_prefixes": [],
+      "search_terms": ["atorvastatin", "rosuvastatin", "simvastatin", "pravastatin", "lovastatin", "pitavastatin"],
+      "notes": "Requires medication table conversion."
+    },
+    {
+      "name": "LDL cholesterol",
+      "domain": "Labs/vitals",
+      "primary_table": "lab_result",
+      "status": "available_after_lab_conversion",
+      "code_systems": ["LOINC", "TNX"],
+      "code_prefixes": [],
+      "search_terms": ["LDL", "cholesterol"],
+      "notes": "Requires lab table conversion and LOINC curation."
+    },
+    {
+      "name": "Blood pressure",
+      "domain": "Labs/vitals",
+      "primary_table": "vitals_signs",
+      "status": "available_after_vitals_conversion",
+      "code_systems": ["LOINC"],
+      "code_prefixes": [],
+      "search_terms": ["systolic", "diastolic", "blood pressure"],
+      "notes": "Requires vitals table conversion."
+    }
+  ]
+}
