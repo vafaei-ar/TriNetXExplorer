@@ -4,11 +4,12 @@ Local tools for inspecting TriNetX export archives and building a secure aggrega
 
 ## Current status
 
-The repository now has three layers:
+The repository now has four layers:
 
 1. A conservative ZIP audit script.
 2. A safe aggregate profiling script.
 3. A dashboard v0.1 that reads only audit/profile outputs.
+4. A Parquet conversion scaffold for selected event-level tables.
 
 The dashboard does **not** open raw TriNetX ZIP exports and does **not** display patient-level rows.
 
@@ -102,6 +103,32 @@ In the sidebar, point the dashboard to either a generated profile directory or p
 ```text
 outputs/trinetx_profile/20260630_193653.zip
 ```
+
+## Convert selected tables to Parquet
+
+Start with a dry run:
+
+```bash
+python scripts/convert_trinetx_zip_to_parquet.py \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
+  --output-dir data/trinetx_parquet \
+  --catalog-dir outputs/trinetx_parquet_catalog \
+  --dry-run
+```
+
+Then run a tiny smoke test:
+
+```bash
+python scripts/convert_trinetx_zip_to_parquet.py \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
+  --output-dir data/trinetx_parquet \
+  --catalog-dir outputs/trinetx_parquet_catalog \
+  --tables dataset_details.csv,cohort_details.csv,manifest.csv \
+  --max-chunks-per-file 1 \
+  --overwrite
+```
+
+See `docs/PARQUET_CONVERSION.md` before converting large event tables.
 
 ## Why profile before final dashboard
 
