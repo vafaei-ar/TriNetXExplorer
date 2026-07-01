@@ -21,14 +21,17 @@ SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SMALL_CELL_THRESHOLD_DEFAULT = 11
 CONCEPT_REGISTRY_PATH = Path("config/research_concepts.json")
 
-
-st.set_page_config(page_title="TriNetX Research Workspace", page_icon="TNX", layout="wide")
+st.set_page_config(page_title="TriNetX Research Workspace", layout="wide")
 
 
 def quote_ident(name: str) -> str:
     if not SAFE_IDENTIFIER_RE.match(name):
         raise ValueError(f"Unsafe SQL identifier: {name}")
     return f'"{name}"'
+
+
+def sql_string(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 @st.cache_data(show_spinner=False)
@@ -84,15 +87,6 @@ def show_df(df: pd.DataFrame, height: int = 380) -> None:
         st.dataframe(df, use_container_width=True, height=height)
 
 
-def metric_int(value: Any) -> str:
-    try:
-        if pd.isna(value):
-            return "-"
-        return f"{int(float(value)):,}"
-    except Exception:
-        return str(value)
-
-
 def view_set(view_df: pd.DataFrame) -> set[str]:
     if view_df.empty or "view_name" not in view_df.columns:
         return set()
@@ -110,14 +104,12 @@ def count_by_archive_sql(view_name: str, colnames: list[str], selected_archive: 
     qview = quote_ident(view_name)
     acol = archive_column(colnames)
     if acol:
-        qarchive = quote_ident(acol)
-        expr = f"cast({qarchive} as varchar)"
+        archive_expr = f"cast({quote_ident(acol)} as varchar)"
         where = ""
         if selected_archive != "All":
-            escaped = selected_archive.replace("'", "''")
-            where = f"where {expr} = '{escaped}'"
+            where = f"where {archive_expr} = {sql_string(selected_archive)}"
         return f"""
-        select {expr} as archive_short, count(*) as n
+        select {archive_expr} as archive_short, count(*) as n
         from {qview}
         {where}
         group by 1
@@ -129,11 +121,10 @@ def count_by_archive_sql(view_name: str, colnames: list[str], selected_archive: 
 def aggregate_text_search_sql(view_name: str, colnames: list[str], term: str, limit: int = 500) -> str:
     qview = quote_ident(view_name)
     safe_term = term.replace("'", "''").lower()
-    text_cols = [c for c in colnames if c not in {"patient_id", "encounter_id", "unique_id", "source_id"}]
+    excluded = {"patient_id", "encounter_id", "unique_id", "source_id"}
+    text_cols = [c for c in colnames if c not in excluded]
     predicates = [f"lower(cast({quote_ident(c)} as varchar)) like '%{safe_term}%'" for c in text_cols]
-    selected_cols = ", ".join(quote_ident(c) for c in text_cols[:20])
-    if not selected_cols:
-        selected_cols = "*"
+    selected_cols = ", ".join(quote_ident(c) for c in text_cols[:20]) or "*"
     return f"""
     select {selected_cols}
     from {qview}
@@ -156,13 +147,14 @@ def diagnosis_feasibility_sql(
     acol = archive_column(colnames)
     if not code_col:
         raise ValueError("v_diagnosis does not contain a `code` column.")
-    where_parts = []
+
+    where_parts: list[str] = []
     if acol and selected_archive != "All":
-        where_parts.append(f"cast({quote_ident(acol)} as varchar) = '{selected_archive.replace("'", "''")}'")
+        where_parts.append(f"cast({quote_ident(acol)} as varchar) = {sql_string(selected_archive)}")
     if code_system_col and code_system and code_system != "All":
-        where_parts.append(f"cast({quote_ident(code_system_col)} as varchar) = '{code_system.replace("'", "''")}'")
+        where_parts.append(f"cast({quote_ident(code_system_col)} as varchar) = {sql_string(code_system)}")
     if code_prefix:
-        where_parts.append(f"starts_with(cast({quote_ident(code_col)} as varchar), '{code_prefix.replace("'", "''")}')")
+        where_parts.append(f"starts_with(cast({quote_ident(code_col)} as varchar), {sql_string(code_prefix)})")
     where_sql = "where " + " and ".join(where_parts) if where_parts else ""
     archive_expr = f"cast({quote_ident(acol)} as varchar)" if acol else "'all'"
     patient_expr = f"count(distinct {quote_ident(patient_col)})" if patient_col else "NULL"
@@ -201,14 +193,9 @@ TriNetXExplorer currently organizes three local TriNetX exports into a safe expl
 Use this workspace to learn what is available, identify candidate concepts, and estimate feasibility before building a formal analysis plan.
         """.strip()
     )
-
     current_views = view_set(vdf)
     core = ["v_patient", "v_patient_cohort", "v_standardized_terminology", "v_manifest"]
-    rows = []
-    for view_name in core:
-        rows.append({"component": view_name, "available": view_name in current_views})
-    show_df(pd.DataFrame(rows), height=180)
-
+    show_df(pd.DataFrame([{"component": v, "available": v in current_views} for v in core]), height=180)
     if "v_patient" in current_views:
         cols = columns(db_path, "v_patient")
         counts = query_duckdb(db_path, count_by_archive_sql("v_patient", cols, selected_archive))
@@ -220,18 +207,17 @@ def render_study_areas(vdf: pd.DataFrame) -> None:
     st.subheader("What can I study?")
     current = view_set(vdf)
     areas = [
-        {"research_area": "Stroke/TIA diagnosis cohorts", "status": "Available after diagnosis conversion" if "v_diagnosis" not in current else "Available now", "needed_views": "v_diagnosis, v_patient"},
-        {"research_area": "AFib, hypertension, diabetes comorbidities", "status": "Available after diagnosis conversion" if "v_diagnosis" not in current else "Available now", "needed_views": "v_diagnosis, v_patient"},
+        {"research_area": "Stroke/TIA diagnosis cohorts", "status": "Available now" if "v_diagnosis" in current else "Available after diagnosis conversion", "needed_views": "v_diagnosis, v_patient"},
+        {"research_area": "AFib, hypertension, diabetes comorbidities", "status": "Available now" if "v_diagnosis" in current else "Available after diagnosis conversion", "needed_views": "v_diagnosis, v_patient"},
         {"research_area": "Demographics and cohort composition", "status": "Available now" if "v_patient" in current else "Needs patient conversion", "needed_views": "v_patient, v_patient_cohort"},
         {"research_area": "Terminology/code search", "status": "Available now" if "v_standardized_terminology" in current else "Needs terminology conversion", "needed_views": "v_standardized_terminology"},
-        {"research_area": "Acute stroke procedures", "status": "Available after procedure conversion" if "v_procedure" not in current else "Available now", "needed_views": "v_procedure"},
+        {"research_area": "Acute stroke procedures", "status": "Available now" if "v_procedure" in current else "Available after procedure conversion", "needed_views": "v_procedure"},
         {"research_area": "Medication exposure", "status": "Available after medication conversion", "needed_views": "v_medication_ingredient, v_medication_drug"},
         {"research_area": "Labs and vitals", "status": "Available after lab/vitals conversion", "needed_views": "v_lab_result, v_vitals_signs"},
         {"research_area": "Cost/utilization", "status": "Control/Diamond only after cost conversion", "needed_views": "v_cost_medical, v_cost_pharmacy"},
         {"research_area": "Encounter-based analyses", "status": "Research Network only after encounter conversion", "needed_views": "v_encounter"},
     ]
-    df = pd.DataFrame(areas)
-    show_df(df, height=430)
+    show_df(pd.DataFrame(areas), height=430)
 
 
 def render_network_differences() -> None:
@@ -254,40 +240,33 @@ def render_concept_browser(db_path: str, vdf: pd.DataFrame) -> None:
     if not concepts.empty:
         st.write("Initial concept registry. These definitions are for feasibility only and require clinical validation.")
         show_df(concepts, height=360)
-
-    current = view_set(vdf)
     st.divider()
     st.write("Search standardized terminology")
-    if "v_standardized_terminology" not in current:
+    if "v_standardized_terminology" not in view_set(vdf):
         st.info("Convert `standardized_terminology.csv` and rebuild DuckDB views to enable terminology search.")
         return
     term = st.text_input("Search term", value="stroke")
     if term.strip():
         cols = columns(db_path, "v_standardized_terminology")
-        try:
-            results = query_duckdb(db_path, aggregate_text_search_sql("v_standardized_terminology", cols, term.strip()))
-            show_df(results, height=460)
-        except Exception as exc:
-            st.error(f"Terminology search failed: {exc}")
+        results = query_duckdb(db_path, aggregate_text_search_sql("v_standardized_terminology", cols, term.strip()))
+        show_df(results, height=460)
 
 
 def render_feasibility(db_path: str, vdf: pd.DataFrame, selected_archive: str, threshold: int) -> None:
     st.subheader("Cohort feasibility")
-    st.markdown(
-        "This page is designed to answer: **How many patients might match my idea?** It becomes active when the relevant event table has been converted."
-    )
+    st.markdown("This page answers: **How many patients might match my idea?** It becomes active when the relevant event table has been converted.")
     current = view_set(vdf)
     if "v_diagnosis" not in current:
         st.info("Diagnosis-backed feasibility is not active yet. Convert `diagnosis.csv` archive-by-archive and rebuild DuckDB views.")
         st.code(
-            """python scripts/convert_trinetx_zip_to_parquet.py \\
-  --input-glob "$HOME/datasets/trinetx/*.zip" \\
-  --output-dir data/trinetx_parquet \\
-  --catalog-dir outputs/trinetx_parquet_catalog \\
-  --archives stroke_research \\
-  --tables diagnosis.csv \\
-  --chunksize 250000 \\
-  --compression snappy \\
+            """python scripts/convert_trinetx_zip_to_parquet.py \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
+  --output-dir data/trinetx_parquet \
+  --catalog-dir outputs/trinetx_parquet_catalog \
+  --archives stroke_research \
+  --tables diagnosis.csv \
+  --chunksize 250000 \
+  --compression snappy \
   --overwrite""",
             language="bash",
         )
@@ -296,23 +275,17 @@ def render_feasibility(db_path: str, vdf: pd.DataFrame, selected_archive: str, t
     diag_cols = columns(db_path, "v_diagnosis")
     code_system = "All"
     if "code_system" in diag_cols:
-        systems_df = query_duckdb(
-            db_path,
-            "select distinct cast(code_system as varchar) as code_system from v_diagnosis order by 1 limit 100",
-        )
+        systems_df = query_duckdb(db_path, "select distinct cast(code_system as varchar) as code_system from v_diagnosis order by 1 limit 100")
         systems = ["All"] + [str(x) for x in systems_df["code_system"].dropna().tolist()]
         code_system = st.selectbox("Code system", systems)
     code_prefix = st.text_input("Code prefix", value="I63")
     if st.button("Run diagnosis feasibility query"):
-        try:
-            sql = diagnosis_feasibility_sql(diag_cols, selected_archive, code_system, code_prefix.strip(), threshold)
-            result = query_duckdb(db_path, sql)
-            show_df(result, height=260)
-            if not result.empty and "patients" in result.columns:
-                fig = px.bar(result, x="archive_short", y="patients", title="Aggregate patient feasibility count")
-                st.plotly_chart(fig, use_container_width=True)
-        except Exception as exc:
-            st.error(f"Feasibility query failed: {exc}")
+        sql = diagnosis_feasibility_sql(diag_cols, selected_archive, code_system, code_prefix.strip(), threshold)
+        result = query_duckdb(db_path, sql)
+        show_df(result, height=260)
+        if not result.empty and "patients" in result.columns:
+            fig = px.bar(result, x="archive_short", y="patients", title="Aggregate patient feasibility count")
+            st.plotly_chart(fig, use_container_width=True)
 
 
 def render_recipes() -> None:
@@ -332,7 +305,6 @@ def render_recipes() -> None:
 def main() -> None:
     st.title("TriNetX Research Workspace")
     st.caption("A faculty-facing workspace for learning, exploring, and testing research ideas using aggregate-only views.")
-
     with st.sidebar:
         db_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
         selected_archive = st.selectbox("Archive/network", ["All", "control_20240514", "stroke_diamond", "stroke_research"])
@@ -345,16 +317,8 @@ def main() -> None:
         st.info("Run Parquet conversion and `scripts/build_duckdb_views.py`, then reload this page.")
         return
 
-    st.warning("This page is aggregate-only. It must not display raw patient rows or identifiers. Concept definitions are preliminary until clinically validated.")
-
-    tabs = st.tabs([
-        "Data guide",
-        "What can I study?",
-        "Network differences",
-        "Concept browser",
-        "Feasibility",
-        "Recipes",
-    ])
+    st.warning("Aggregate-only. Do not display raw patient rows or identifiers. Concept definitions are preliminary until clinically validated.")
+    tabs = st.tabs(["Data guide", "What can I study?", "Network differences", "Concept browser", "Feasibility", "Recipes"])
     with tabs[0]:
         render_data_guide(db_path, vdf, selected_archive)
     with tabs[1]:
