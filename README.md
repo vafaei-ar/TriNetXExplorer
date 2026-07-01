@@ -26,7 +26,37 @@ Known local files:
 ~/datasets/trinetx/stroke_research_network_dataset_68b1a0575a2bf16052a523ef.zip
 ```
 
+## Set up a virtual environment
+
+Do not install dashboard dependencies into the base environment.
+
+From the repository root:
+
+```bash
+bash scripts/setup_venv.sh
+source .venv/bin/activate
+```
+
+Equivalent manual setup:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+The `.venv/` directory is ignored by Git.
+
 ## Run the structural audit
+
+Activate the virtual environment first:
+
+```bash
+source .venv/bin/activate
+```
+
+Then run:
 
 ```bash
 python scripts/audit_trinetx_archives.py \
@@ -62,15 +92,8 @@ This writes aggregate profile files only. It does not write raw patient-level ro
 
 ## Run dashboard v0.1
 
-Install dependencies:
-
 ```bash
-pip install -r requirements.txt
-```
-
-Start Streamlit:
-
-```bash
+source .venv/bin/activate
 streamlit run dashboard/app.py
 ```
 
