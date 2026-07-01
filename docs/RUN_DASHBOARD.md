@@ -2,13 +2,25 @@
 
 The first dashboard reads aggregate profile outputs only. It does not open raw TriNetX ZIP exports.
 
-## Install dependencies
+## Create and activate a virtual environment
 
 From the repository root:
 
 ```bash
+bash scripts/setup_venv.sh
+source .venv/bin/activate
+```
+
+Manual equivalent:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
+
+The `.venv/` directory is ignored by Git.
 
 ## Generate profile outputs
 
@@ -28,6 +40,7 @@ The script writes a timestamped output directory and a ZIP under `outputs/trinet
 ## Start dashboard
 
 ```bash
+source .venv/bin/activate
 streamlit run dashboard/app.py
 ```
 
