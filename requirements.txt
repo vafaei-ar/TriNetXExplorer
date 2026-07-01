@@ -1,2 +1,3 @@
-# Current audit scaffold uses only the Python standard library.
-# Dashboard dependencies will be added after the first data audit.
+pandas>=2.0
+plotly>=5.20
+streamlit>=1.35
