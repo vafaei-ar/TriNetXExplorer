@@ -3,9 +3,9 @@
 Run:
     streamlit run dashboard/app.py
 
-The dashboard reads aggregate profile outputs and, optionally, aggregate queries
-from a local DuckDB database built over local Parquet files. It is not a raw
-TriNetX data browser.
+This page is the technical profile/dashboard view. It uses friendly dataset names
+(Control, Stroke Diamond, Stroke Research) and hides raw ZIP/archive filenames by
+default. It does not display raw TriNetX rows.
 """
 from __future__ import annotations
 
@@ -30,15 +30,39 @@ EXPECTED_PROFILE_FILES = [
     "numeric_summaries.csv",
 ]
 
+DATASET_LABELS = {
+    "control_20240514": "Control",
+    "stroke_diamond": "Stroke Diamond",
+    "stroke_research": "Stroke Research",
+}
+DATASET_KEYS = {v: k for k, v in DATASET_LABELS.items()}
+ALL_DATASETS = "All datasets"
+ALL_TABLES = "All tables"
 SMALL_CELL_THRESHOLD_DEFAULT = 11
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+st.set_page_config(page_title="TriNetXExplorer", layout="wide")
 
-st.set_page_config(
-    page_title="TriNetXExplorer",
-    page_icon="TNX",
-    layout="wide",
-)
+
+def dataset_label(value: str) -> str:
+    return DATASET_LABELS.get(str(value), str(value))
+
+
+def selected_dataset_key(label: str) -> str:
+    if label == ALL_DATASETS:
+        return "All"
+    return DATASET_KEYS[label]
+
+
+def table_label(value: str) -> str:
+    text = str(value)
+    return text[:-4] if text.endswith(".csv") else text
+
+
+def selected_table_name(label: str, mapping: dict[str, str]) -> str:
+    if label == ALL_TABLES:
+        return "All"
+    return mapping[label]
 
 
 def _read_csv_from_zip(zf: zipfile.ZipFile, name: str) -> pd.DataFrame:
@@ -70,31 +94,54 @@ def load_profile(path_text: str) -> tuple[dict[str, pd.DataFrame], dict]:
         if m.exists():
             manifest = json.loads(m.read_text(encoding="utf-8"))
     else:
-        raise FileNotFoundError(f"Profile path not found: {path}")
+        raise FileNotFoundError(f"Profile catalog not found: {path}")
 
     return data, manifest
 
 
 def latest_profile_path(base: str = "outputs/trinetx_profile") -> str:
     base_path = Path(base)
+    fixed_zip = base_path / "latest.zip"
+    fixed_dir = base_path / "latest"
+    if fixed_zip.exists():
+        return str(fixed_zip)
+    if fixed_dir.exists():
+        return str(fixed_dir)
     if not base_path.exists():
-        return base
+        return str(fixed_zip)
     candidates = [p for p in base_path.iterdir() if p.is_dir()]
     zips = [p for p in base_path.iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
-    all_candidates = candidates + zips
+    all_candidates = [p for p in candidates + zips if p.name != "latest.zip"]
     if not all_candidates:
-        return base
+        return str(fixed_zip)
     return str(max(all_candidates, key=lambda p: p.stat().st_mtime))
 
 
-def filter_frame(df: pd.DataFrame, archive: str, table: str | None = None) -> pd.DataFrame:
+def filter_frame(df: pd.DataFrame, dataset_key: str, table: str | None = None) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
-    if archive != "All" and "archive_short" in out.columns:
-        out = out[out["archive_short"] == archive]
+    if dataset_key != "All" and "archive_short" in out.columns:
+        out = out[out["archive_short"] == dataset_key]
     if table and table != "All" and "member_path" in out.columns:
         out = out[out["member_path"] == table]
+    return out
+
+
+def display_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "archive_short" in out.columns:
+        out.insert(0, "dataset", out["archive_short"].map(dataset_label))
+    # Hide long raw ZIP names by default. The stable short key and friendly dataset name are enough.
+    hide_cols = [c for c in ["archive_name"] if c in out.columns]
+    out = out.drop(columns=hide_cols)
+    if "member_path" in out.columns:
+        out = out.rename(columns={"member_path": "table"})
+        out["table"] = out["table"].map(table_label)
+    if "archive_short" in out.columns:
+        out = out.drop(columns=["archive_short"])
     return out
 
 
@@ -102,7 +149,7 @@ def show_dataframe(df: pd.DataFrame, height: int = 380) -> None:
     if df.empty:
         st.info("No rows available for the selected filters.")
     else:
-        st.dataframe(df, use_container_width=True, height=height)
+        st.dataframe(display_frame(df), use_container_width=True, height=height)
 
 
 def metric_int(value) -> str:
@@ -114,22 +161,26 @@ def metric_int(value) -> str:
         return str(value)
 
 
-def available_archives(data: dict[str, pd.DataFrame]) -> list[str]:
+def available_dataset_labels(data: dict[str, pd.DataFrame]) -> list[str]:
     vals: set[str] = set()
     for df in data.values():
         if not df.empty and "archive_short" in df.columns:
             vals.update(str(x) for x in df["archive_short"].dropna().unique())
-    return ["All"] + sorted(vals)
+    labels = [dataset_label(x) for x in sorted(vals)]
+    preferred = ["Control", "Stroke Diamond", "Stroke Research"]
+    ordered = [x for x in preferred if x in labels] + [x for x in labels if x not in preferred]
+    return [ALL_DATASETS] + ordered
 
 
-def available_tables(data: dict[str, pd.DataFrame], archive: str) -> list[str]:
+def available_tables(data: dict[str, pd.DataFrame], dataset_key: str) -> tuple[list[str], dict[str, str]]:
     vals: set[str] = set()
     for df in data.values():
         if df.empty or "member_path" not in df.columns:
             continue
-        tmp = filter_frame(df, archive)
+        tmp = filter_frame(df, dataset_key)
         vals.update(str(x) for x in tmp["member_path"].dropna().unique())
-    return ["All"] + sorted(vals)
+    mapping = {table_label(x): x for x in sorted(vals)}
+    return [ALL_TABLES] + list(mapping.keys()), mapping
 
 
 def metadata_manifest(metadata: pd.DataFrame) -> pd.DataFrame:
@@ -174,11 +225,8 @@ def duckdb_views(db_path_text: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def duckdb_columns(db_path_text: str, view_name: str) -> list[str]:
-    qview = quote_ident(view_name)
-    df = duckdb_query(db_path_text, f"describe {qview}")
-    if "column_name" not in df.columns:
-        return []
-    return [str(x) for x in df["column_name"].tolist()]
+    df = duckdb_query(db_path_text, f"describe {quote_ident(view_name)}")
+    return [str(x) for x in df["column_name"].tolist()] if "column_name" in df.columns else []
 
 
 def view_exists(views: pd.DataFrame, view_name: str) -> bool:
@@ -192,11 +240,31 @@ def archive_column(cols: list[str]) -> str | None:
     return None
 
 
+def count_by_dataset_sql(view_name: str, cols: list[str], dataset_key: str) -> str:
+    qview = quote_ident(view_name)
+    acol = archive_column(cols)
+    if acol:
+        qarchive = quote_ident(acol)
+        archive_expr = f"cast({qarchive} as varchar)"
+        where = ""
+        if dataset_key != "All":
+            escaped = dataset_key.replace("'", "''")
+            where = f"where {archive_expr} = '{escaped}'"
+        return f"""
+            select {archive_expr} as archive_short, count(*) as n
+            from {qview}
+            {where}
+            group by 1
+            order by archive_short
+        """
+    return f"select 'all' as archive_short, count(*) as n from {qview}"
+
+
 def filtered_aggregate_sql(
     view_name: str,
     cols: list[str],
     group_col: str,
-    selected_archive: str,
+    dataset_key: str,
     threshold: int,
     limit: int = 500,
 ) -> str:
@@ -207,8 +275,8 @@ def filtered_aggregate_sql(
         qarchive = quote_ident(acol)
         archive_expr = f"cast({qarchive} as varchar)"
         where = ""
-        if selected_archive != "All":
-            escaped = selected_archive.replace("'", "''")
+        if dataset_key != "All":
+            escaped = dataset_key.replace("'", "''")
             where = f"where {archive_expr} = '{escaped}'"
         return f"""
             select
@@ -223,10 +291,7 @@ def filtered_aggregate_sql(
             limit {int(limit)}
         """
     return f"""
-        select
-          'all' as archive_short,
-          cast({qgroup} as varchar) as value,
-          count(*) as n
+        select 'all' as archive_short, cast({qgroup} as varchar) as value, count(*) as n
         from {qview}
         group by 1, 2
         having count(*) >= {int(threshold)}
@@ -235,58 +300,34 @@ def filtered_aggregate_sql(
     """
 
 
-def count_by_archive_sql(view_name: str, cols: list[str], selected_archive: str) -> str:
-    qview = quote_ident(view_name)
-    acol = archive_column(cols)
-    if acol:
-        qarchive = quote_ident(acol)
-        archive_expr = f"cast({qarchive} as varchar)"
-        where = ""
-        if selected_archive != "All":
-            escaped = selected_archive.replace("'", "''")
-            where = f"where {archive_expr} = '{escaped}'"
-        return f"""
-            select {archive_expr} as archive_short, count(*) as n
-            from {qview}
-            {where}
-            group by 1
-            order by archive_short
-        """
-    return f"select 'all' as archive_short, count(*) as n from {qview}"
-
-
-def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) -> None:
+def duckdb_aggregate_tab(db_path: str, dataset_key: str, threshold: int) -> None:
     st.subheader("Parquet/DuckDB aggregate explorer")
-    st.markdown(
-        "This tab queries local DuckDB views over local Parquet files. It shows aggregate counts only; it does not show raw rows."
-    )
+    st.markdown("Queries local DuckDB views over local Parquet files. Aggregate counts only; no raw rows.")
 
     try:
         views = duckdb_views(db_path)
     except Exception as exc:
         st.info(f"DuckDB is not available yet: {exc}")
         return
-
     if views.empty:
         st.info("No DuckDB views found. Run `scripts/build_duckdb_views.py` first.")
         return
 
-    st.write("Available views")
-    show_dataframe(views, height=220)
+    views_display = views.copy()
+    show_dataframe(views_display, height=220)
 
     summary_rows: list[pd.DataFrame] = []
     for view_name in views["view_name"].astype(str):
         try:
             cols = duckdb_columns(db_path, view_name)
-            counts = duckdb_query(db_path, count_by_archive_sql(view_name, cols, selected_archive))
+            counts = duckdb_query(db_path, count_by_dataset_sql(view_name, cols, dataset_key))
             counts.insert(0, "view_name", view_name)
             summary_rows.append(counts)
         except Exception as exc:
             st.warning(f"Could not count {view_name}: {exc}")
     if summary_rows:
-        st.write("Aggregate row counts by archive")
-        row_counts = pd.concat(summary_rows, ignore_index=True)
-        show_dataframe(row_counts, height=320)
+        st.write("Aggregate row counts by dataset")
+        show_dataframe(pd.concat(summary_rows, ignore_index=True), height=320)
 
     st.divider()
     st.subheader("Patient aggregates")
@@ -298,18 +339,10 @@ def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) ->
         ]
         if candidate_fields:
             field = st.selectbox("Patient aggregate field", candidate_fields)
-            demo_df = duckdb_query(
-                db_path,
-                filtered_aggregate_sql("v_patient", patient_cols, field, selected_archive, threshold),
-            )
+            demo_df = duckdb_query(db_path, filtered_aggregate_sql("v_patient", patient_cols, field, dataset_key, threshold))
             if not demo_df.empty:
-                fig = px.bar(
-                    demo_df,
-                    x="value",
-                    y="n",
-                    color="archive_short",
-                    title=f"Patient counts by {field}",
-                )
+                plot_df = display_frame(demo_df)
+                fig = px.bar(plot_df, x="value", y="n", color="dataset" if "dataset" in plot_df.columns else None, title=f"Patient counts by {field}")
                 st.plotly_chart(fig, use_container_width=True)
             show_dataframe(demo_df, height=420)
         else:
@@ -321,18 +354,14 @@ def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) ->
     st.subheader("Patient-cohort aggregates")
     if view_exists(views, "v_patient_cohort"):
         cohort_cols = duckdb_columns(db_path, "v_patient_cohort")
-        visible_cols = [c for c in cohort_cols if c not in {"patient_id", "encounter_id", "unique_id", "source_id"}]
-        group_options = [c for c in visible_cols if c not in {"__source_archive", "__source_member", "archive", "table"}]
-        group_options = [c for c in group_options if c != archive_column(cohort_cols)]
+        hidden = {"patient_id", "encounter_id", "unique_id", "source_id", "__source_archive", "__source_member", "archive", "table"}
+        group_options = [c for c in cohort_cols if c not in hidden and c != archive_column(cohort_cols)]
         if group_options:
             field = st.selectbox("Patient-cohort aggregate field", group_options)
-            cohort_df = duckdb_query(
-                db_path,
-                filtered_aggregate_sql("v_patient_cohort", cohort_cols, field, selected_archive, threshold),
-            )
+            cohort_df = duckdb_query(db_path, filtered_aggregate_sql("v_patient_cohort", cohort_cols, field, dataset_key, threshold))
             show_dataframe(cohort_df, height=420)
         else:
-            counts = duckdb_query(db_path, count_by_archive_sql("v_patient_cohort", cohort_cols, selected_archive))
+            counts = duckdb_query(db_path, count_by_dataset_sql("v_patient_cohort", cohort_cols, dataset_key))
             show_dataframe(counts, height=220)
     else:
         st.info("`v_patient_cohort` is not available yet. Convert `patient_cohort.csv` and rebuild DuckDB views.")
@@ -344,13 +373,10 @@ def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) ->
         term_fields = [c for c in ["code_system", "category", "type", "domain", "vocabulary"] if c in term_cols]
         if term_fields:
             field = st.selectbox("Terminology aggregate field", term_fields)
-            term_df = duckdb_query(
-                db_path,
-                filtered_aggregate_sql("v_standardized_terminology", term_cols, field, selected_archive, threshold),
-            )
+            term_df = duckdb_query(db_path, filtered_aggregate_sql("v_standardized_terminology", term_cols, field, dataset_key, threshold))
             show_dataframe(term_df, height=420)
         else:
-            counts = duckdb_query(db_path, count_by_archive_sql("v_standardized_terminology", term_cols, selected_archive))
+            counts = duckdb_query(db_path, count_by_dataset_sql("v_standardized_terminology", term_cols, dataset_key))
             show_dataframe(counts, height=220)
     else:
         st.info("`v_standardized_terminology` is not available yet. Convert `standardized_terminology.csv` and rebuild DuckDB views.")
@@ -358,25 +384,17 @@ def duckdb_aggregate_tab(db_path: str, selected_archive: str, threshold: int) ->
 
 def main() -> None:
     st.title("TriNetXExplorer")
-    st.caption("Aggregate profile and DuckDB dashboard. It does not open raw TriNetX exports or display patient-level rows.")
+    st.caption("Aggregate profile and DuckDB dashboard. It uses friendly dataset names and never displays raw patient-level rows.")
 
     with st.sidebar:
-        st.header("Profile source")
-        default_path = latest_profile_path()
-        profile_path = st.text_input("Profile output directory or ZIP", value=default_path)
-        st.markdown(
-            "Run `scripts/profile_trinetx_archives.py` first. "
-            "Point this dashboard to the generated output directory or ZIP."
-        )
-        st.header("DuckDB source")
-        duckdb_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
-        small_cell_threshold = st.number_input(
-            "Small-cell threshold",
-            min_value=1,
-            max_value=1000,
-            value=SMALL_CELL_THRESHOLD_DEFAULT,
-            step=1,
-        )
+        st.header("Dataset")
+        default_profile = latest_profile_path()
+        with st.expander("Profile catalog", expanded=False):
+            profile_path = st.text_input("Profile catalog path", value=default_profile)
+            st.caption("Recommended fixed path: `outputs/trinetx_profile/latest.zip`. Timestamped ZIPs are still supported but should not be shown to most users.")
+        with st.expander("DuckDB source", expanded=False):
+            duckdb_path = st.text_input("DuckDB database", value="data/trinetx.duckdb")
+        small_cell_threshold = st.number_input("Small-cell threshold", min_value=1, max_value=1000, value=SMALL_CELL_THRESHOLD_DEFAULT, step=1)
 
     try:
         data, manifest = load_profile(profile_path)
@@ -384,31 +402,32 @@ def main() -> None:
         st.error(str(exc))
         st.stop()
 
-    archives = available_archives(data)
+    dataset_options = available_dataset_labels(data)
     with st.sidebar:
-        archive = st.selectbox("Archive", archives)
-        tables = available_tables(data, archive)
-        table = st.selectbox("Profile table", tables)
+        dataset_choice = st.selectbox("Dataset", dataset_options)
+        dataset_key = selected_dataset_key(dataset_choice)
+        table_options, table_mapping = available_tables(data, dataset_key)
+        table_choice = st.selectbox("Table", table_options)
+        table = selected_table_name(table_choice, table_mapping)
 
-    table_profiles = filter_frame(data.get("table_profiles.csv", pd.DataFrame()), archive, table)
-    metadata = filter_frame(data.get("metadata_tables.csv", pd.DataFrame()), archive, table)
-    code_systems = filter_frame(data.get("code_system_counts.csv", pd.DataFrame()), archive, table)
-    top_codes = filter_frame(data.get("top_codes_suppressed.csv", pd.DataFrame()), archive, table)
-    demographics = filter_frame(data.get("patient_demographics_suppressed.csv", pd.DataFrame()), archive, table)
-    dates = filter_frame(data.get("date_ranges.csv", pd.DataFrame()), archive, table)
-    numeric = filter_frame(data.get("numeric_summaries.csv", pd.DataFrame()), archive, table)
+    table_profiles = filter_frame(data.get("table_profiles.csv", pd.DataFrame()), dataset_key, table)
+    metadata = filter_frame(data.get("metadata_tables.csv", pd.DataFrame()), dataset_key, table)
+    code_systems = filter_frame(data.get("code_system_counts.csv", pd.DataFrame()), dataset_key, table)
+    top_codes = filter_frame(data.get("top_codes_suppressed.csv", pd.DataFrame()), dataset_key, table)
+    demographics = filter_frame(data.get("patient_demographics_suppressed.csv", pd.DataFrame()), dataset_key, table)
+    dates = filter_frame(data.get("date_ranges.csv", pd.DataFrame()), dataset_key, table)
+    numeric = filter_frame(data.get("numeric_summaries.csv", pd.DataFrame()), dataset_key, table)
 
     st.warning(
         "Profile-derived counts are sample-based unless `scan_mode` says full. "
-        "DuckDB-derived counts are aggregate queries over locally converted Parquet. "
-        "Neither should expose raw TriNetX rows."
+        "DuckDB-derived counts are aggregate queries over locally converted Parquet. No raw rows are displayed."
     )
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Profile scan mode", manifest.get("scan_mode", "-"))
-    c2.metric("Rows per file", metric_int(manifest.get("max_rows_per_file")))
-    c3.metric("Small-cell threshold", metric_int(small_cell_threshold))
-    c4.metric("Elapsed seconds", metric_int(manifest.get("elapsed_seconds")))
+    c1.metric("Selected dataset", dataset_choice)
+    c2.metric("Profile scan mode", manifest.get("scan_mode", "-"))
+    c3.metric("Rows per file", metric_int(manifest.get("max_rows_per_file")))
+    c4.metric("Small-cell threshold", metric_int(small_cell_threshold))
 
     tabs = st.tabs([
         "Inventory",
@@ -425,24 +444,17 @@ def main() -> None:
     with tabs[0]:
         st.subheader("Profiled tables")
         show_dataframe(table_profiles)
-
-        manifest_rows = metadata_manifest(filter_frame(data.get("metadata_tables.csv", pd.DataFrame()), archive))
+        manifest_rows = metadata_manifest(filter_frame(data.get("metadata_tables.csv", pd.DataFrame()), dataset_key))
         if not manifest_rows.empty:
             st.subheader("Manifest row counts")
             total_rows = pd.to_numeric(manifest_rows["row_count"], errors="coerce").sum()
-            st.metric("Rows across manifest-selected tables", metric_int(total_rows))
+            st.metric("Rows across selected dataset/table manifest", metric_int(total_rows))
             show_dataframe(manifest_rows, height=500)
 
     with tabs[1]:
         st.subheader("Dataset and cohort metadata")
-        if metadata.empty:
-            st.info("No metadata rows available.")
-        else:
-            md = metadata[metadata["member_path"].isin(["dataset_details.csv", "cohort_details.csv"])].copy()
-            if md.empty:
-                st.info("No dataset/cohort metadata for current filters.")
-            else:
-                show_dataframe(md)
+        md = metadata[metadata["member_path"].isin(["dataset_details.csv", "cohort_details.csv"])].copy() if not metadata.empty else pd.DataFrame()
+        show_dataframe(md)
 
     with tabs[2]:
         st.subheader("Code-system counts")
@@ -450,14 +462,8 @@ def main() -> None:
             plot_df = code_systems[code_systems["suppressed"].fillna(False).eq(False)].copy()
             plot_df["n"] = pd.to_numeric(plot_df["n"], errors="coerce")
             if not plot_df.empty:
-                fig = px.bar(
-                    plot_df,
-                    x="value_1",
-                    y="n",
-                    color="member_path",
-                    facet_col="archive_short" if archive == "All" else None,
-                    title="Sampled code-system counts",
-                )
+                display_plot = display_frame(plot_df)
+                fig = px.bar(display_plot, x="value_1", y="n", color="table" if "table" in display_plot.columns else None, facet_col="dataset" if dataset_key == "All" and "dataset" in display_plot.columns else None, title="Sampled code-system counts")
                 st.plotly_chart(fig, use_container_width=True)
         show_dataframe(code_systems)
 
@@ -470,8 +476,7 @@ def main() -> None:
             if selected_system != "All":
                 tc = tc[tc["value_1"].astype(str).eq(selected_system)]
             tc["n"] = pd.to_numeric(tc["n"], errors="coerce")
-            tc = tc.sort_values("n", ascending=False, na_position="last")
-            show_dataframe(tc, height=600)
+            show_dataframe(tc.sort_values("n", ascending=False, na_position="last"), height=600)
         else:
             st.info("No top-code rows available.")
 
@@ -485,14 +490,8 @@ def main() -> None:
                 dd = dd[dd["field"].astype(str).eq(selected_field)]
             dd["n"] = pd.to_numeric(dd["n"], errors="coerce")
             if not dd.empty:
-                fig = px.bar(
-                    dd[dd["suppressed"].fillna(False).eq(False)],
-                    x="value_1",
-                    y="n",
-                    color="field",
-                    facet_col="archive_short" if archive == "All" else None,
-                    title="Sampled demographic counts",
-                )
+                display_plot = display_frame(dd[dd["suppressed"].fillna(False).eq(False)])
+                fig = px.bar(display_plot, x="value_1", y="n", color="field", facet_col="dataset" if dataset_key == "All" and "dataset" in display_plot.columns else None, title="Sampled demographic counts")
                 st.plotly_chart(fig, use_container_width=True)
             show_dataframe(dd)
         else:
@@ -500,32 +499,27 @@ def main() -> None:
 
     with tabs[5]:
         st.subheader("Date ranges, sample-based")
-        st.markdown(
-            "Date ranges are calculated from the profiled sample. "
-            "Very early minimum dates may reflect shifted/deidentified dates or historical records."
-        )
+        st.markdown("Date ranges come from the profile sample. Very early minimum dates may reflect deidentified shifts or historical records.")
         show_dataframe(dates)
 
     with tabs[6]:
         st.subheader("Numeric and cost summaries, sample-based")
-        st.markdown(
-            "Use cost summaries only for structural review. Negative values likely represent reversals, refunds, or adjustment rows."
-        )
+        st.markdown("Use cost summaries only for structural review. Negative values likely represent reversals, refunds, or adjustment rows.")
         show_dataframe(numeric)
 
     with tabs[7]:
-        duckdb_aggregate_tab(duckdb_path, archive, int(small_cell_threshold))
+        duckdb_aggregate_tab(duckdb_path, dataset_key, int(small_cell_threshold))
 
     with tabs[8]:
         st.subheader("Default privacy rules")
         st.markdown(
             """
-- Do not display raw `patient_id`, `encounter_id`, `unique_id`, or `source_id`.
+- Use friendly dataset names: Control, Stroke Diamond, Stroke Research.
+- Do not display raw ZIP filenames, `patient_id`, `encounter_id`, `unique_id`, or `source_id` in normal user views.
 - Do not show raw rows from TriNetX exports, Parquet files, or DuckDB views.
 - Do not allow patient-level downloads from the dashboard.
 - Apply small-cell suppression, default `n < 11`.
-- Treat this dashboard as internal-only. Do not expose it publicly.
-- Use profile outputs for structural review and DuckDB only for aggregate queries.
+- Treat this dashboard as internal-only.
             """.strip()
         )
 
