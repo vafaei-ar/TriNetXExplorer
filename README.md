@@ -1,10 +1,16 @@
 # TriNetXExplorer
 
-Local tools for inspecting TriNetX export archives and, later, building a secure aggregate dashboard.
+Local tools for inspecting TriNetX export archives and building a secure aggregate dashboard.
 
 ## Current status
 
-The repository starts with a conservative audit scaffold. We need to learn the ZIP contents before designing the dashboard. The first script inventories archives, detects CSV-like files, records schemas, counts rows when feasible, and writes aggregate metadata only.
+The repository now has three layers:
+
+1. A conservative ZIP audit script.
+2. A safe aggregate profiling script.
+3. A dashboard v0.1 that reads only audit/profile outputs.
+
+The dashboard does **not** open raw TriNetX ZIP exports and does **not** display patient-level rows.
 
 ## Data location assumed for local runs
 
@@ -20,38 +26,76 @@ Known local files:
 ~/datasets/trinetx/stroke_research_network_dataset_68b1a0575a2bf16052a523ef.zip
 ```
 
-## Run the first audit
+## Run the structural audit
 
 ```bash
 python scripts/audit_trinetx_archives.py \
-  --input-glob "~/datasets/trinetx/*.zip" \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
   --output-dir outputs/trinetx_audit \
   --sample-rows 5000 \
   --make-zip
 ```
 
-If this is too slow, use a fast structural pass:
+For a faster structural pass:
 
 ```bash
 python scripts/audit_trinetx_archives.py \
-  --input-glob "~/datasets/trinetx/*.zip" \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
   --output-dir outputs/trinetx_audit \
   --sample-rows 1000 \
   --skip-row-counts \
   --make-zip
 ```
 
-Then send back only the generated ZIP under `outputs/trinetx_audit/`. Do not send raw TriNetX CSV files.
+## Run the aggregate profile
 
-## Why audit before dashboard
+```bash
+python scripts/profile_trinetx_archives.py \
+  --input-glob "$HOME/datasets/trinetx/*.zip" \
+  --output-dir outputs/trinetx_profile \
+  --max-rows-per-file 250000 \
+  --small-cell-threshold 11 \
+  --make-zip
+```
 
-The MarketScan dashboard plan is a useful precedent, but TriNetX exports may have different table structure, naming, coding systems, date handling, and cohort files. The dashboard should be driven by observed schemas, not guessed assumptions.
+This writes aggregate profile files only. It does not write raw patient-level rows.
 
-The first dashboard design will use these audit outputs to decide:
+## Run dashboard v0.1
 
-- available tables and files
-- patient, encounter, diagnosis, procedure, medication, lab, and demographic fields
-- date and code fields
-- feasible aggregate views
-- privacy rules and suppression logic
-- whether Streamlit plus DuckDB is sufficient for the first version
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start Streamlit:
+
+```bash
+streamlit run dashboard/app.py
+```
+
+In the sidebar, point the dashboard to either a generated profile directory or profile ZIP, for example:
+
+```text
+outputs/trinetx_profile/20260630_193653.zip
+```
+
+## Why profile before final dashboard
+
+The MarketScan dashboard plan is a useful precedent for security and aggregate-first design. TriNetX exports have different table structure, naming, coding systems, date handling, cohort files, and network-specific schemas. The dashboard must be driven by observed schemas, not guessed assumptions.
+
+Current findings show:
+
+- Control and Diamond exports have cost tables.
+- Research Network has an encounter layer and source IDs.
+- Clinical event files are too large for direct interactive ZIP queries.
+- Dashboard v0.1 should use precomputed aggregate catalogs.
+- Parquet conversion should come before larger interactive event-level exploration.
+
+## Safety defaults
+
+- Do not display `patient_id`, `encounter_id`, `unique_id`, or `source_id`.
+- Do not show raw TriNetX rows.
+- Do not allow patient-level download.
+- Apply small-cell suppression, default `n < 11`.
+- Treat the app as internal-only.
